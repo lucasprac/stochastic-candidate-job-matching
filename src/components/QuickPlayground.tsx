@@ -59,15 +59,15 @@ function cloneDrafts(drafts: readonly QuickQuestionDraft[]): QuickQuestionDraft[
   }));
 }
 
-function createEmptyDraft(index: number): QuickQuestionDraft {
+function createEmptyDraft(): QuickQuestionDraft {
   return {
     id: `qp-custom-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    key: `Pergunta ${index}`,
+    key: '',
     type: 'choice',
     instructions: '',
     choiceOptions: [
-      { key: 'Sim', description: 'Atende ao critério' },
-      { key: 'Não', description: 'Não atende ao critério' },
+      { key: '', description: '' },
+      { key: '', description: '' },
     ],
     scoreCriteria: ['Insuficiente', 'Parcial', 'Atende', 'Excepcional'],
     noulTrue: '',
@@ -101,18 +101,15 @@ export function QuickPlayground({
   hasServerKey: boolean;
   onOpenApiKeyDialog: () => void;
 }) {
-  const initialPreset = QUICK_PRESETS[0];
   const stateTextareaId = useId();
   const fileInputId = useId();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  const [activePresetId, setActivePresetId] = useState<string | null>(initialPreset.id);
-  const [stateText, setStateText] = useState<string>(initialPreset.state);
-  const [drafts, setDrafts] = useState<QuickQuestionDraft[]>(() =>
-    cloneDrafts(initialPreset.questions),
-  );
+  const [activePresetId, setActivePresetId] = useState<string | null>(null);
+  const [stateText, setStateText] = useState<string>('');
+  const [drafts, setDrafts] = useState<QuickQuestionDraft[]>(() => [createEmptyDraft()]);
   const [attachedFile, setAttachedFile] = useState<{ name: string; size: number } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [fileHint, setFileHint] = useState<string | null>(null);
@@ -142,8 +139,22 @@ export function QuickPlayground({
   const isStale = Boolean(lastRun && lastRun.signature !== currentSignature);
   const hasAnyKey = Boolean(apiKey.trim() || hasServerKey);
 
+  const hasEnteredContent = (): boolean => {
+    if (stateText.trim().length > 0) return true;
+    return drafts.some(
+      (d) =>
+        d.key.trim().length > 0 ||
+        d.instructions.trim().length > 0 ||
+        d.noulTrue.trim().length > 0 ||
+        d.noulFalse.trim().length > 0 ||
+        d.choiceOptions.some(
+          (opt) => opt.key.trim().length > 0 || opt.description.trim().length > 0,
+        ),
+    );
+  };
+
   const confirmReplaceIfNeeded = (actionLabel: string): boolean => {
-    const hasUnsavedWork = activePresetId === null || lastRun !== null;
+    const hasUnsavedWork = (activePresetId === null && hasEnteredContent()) || lastRun !== null;
     if (!hasUnsavedWork) return true;
     return window.confirm(
       `Você tem alterações ou resultados ativos na tela. Deseja realmente ${actionLabel}?`,
@@ -154,7 +165,7 @@ export function QuickPlayground({
     if (activePresetId === presetId) return;
     const preset = QUICK_PRESETS.find((p) => p.id === presetId);
     if (!preset) return;
-    if (!confirmReplaceIfNeeded(`carregar o modelo "${preset.label}"`)) return;
+    if (!confirmReplaceIfNeeded(`carregar o exemplo "${preset.label}"`)) return;
     setActivePresetId(preset.id);
     setStateText(preset.state);
     setDrafts(cloneDrafts(preset.questions));
@@ -166,9 +177,10 @@ export function QuickPlayground({
   };
 
   const handleClearState = () => {
-    if (!confirmReplaceIfNeeded('limpar o texto da vaga e do currículo')) return;
+    if (!confirmReplaceIfNeeded('limpar o texto e as perguntas')) return;
     setActivePresetId(null);
     setStateText('');
+    setDrafts([createEmptyDraft()]);
     setAttachedFile(null);
     setFileHint(null);
     setErrorMsg(null);
@@ -225,7 +237,7 @@ export function QuickPlayground({
   const handleAddQuestion = () => {
     if (drafts.length >= 128) return;
     setActivePresetId(null);
-    setDrafts((prev) => [...prev, createEmptyDraft(prev.length + 1)]);
+    setDrafts((prev) => [...prev, createEmptyDraft()]);
   };
 
   const handleRemoveQuestion = (id: string) => {
@@ -251,8 +263,13 @@ export function QuickPlayground({
       if (!d.instructions.trim()) {
         return `Escreva a pergunta #${i + 1} antes de analisar.`;
       }
-      if (d.type === 'choice' && d.choiceOptions.length < 2) {
-        return `A pergunta #${i + 1} (Múltipla escolha) precisa de pelo menos 2 opções.`;
+      if (d.type === 'choice') {
+        const validOptions = d.choiceOptions.filter(
+          (opt) => opt.key.trim().length > 0 || opt.description.trim().length > 0,
+        );
+        if (validOptions.length < 2) {
+          return `A pergunta #${i + 1} (Múltipla escolha) precisa de pelo menos 2 opções preenchidas.`;
+        }
       }
       if (d.type === 'score') {
         const validLevels = d.scoreCriteria.filter((c) => c.trim().length > 0);
@@ -381,7 +398,7 @@ export function QuickPlayground({
 
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs font-semibold text-[var(--sq-content-secondary)]">
-            Modelos prontos:
+            Exemplos prontos:
           </span>
           {QUICK_PRESETS.map((preset) => (
             <PillButton

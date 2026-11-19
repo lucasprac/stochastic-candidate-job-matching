@@ -49,7 +49,7 @@ export function ProjectHero({
               onClick={onExploreDemo}
               className="inline-flex cursor-pointer items-center gap-2 rounded-full bg-[var(--sq-content-primary)] px-4 py-2 text-xs font-semibold text-[var(--sq-surface-primary)] transition hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent-blue)]"
             >
-              <span>Explorar consenso interativo</span>
+              <span>Ver exemplo pronto</span>
               <ArrowDownRight className="h-3.5 w-3.5" />
             </button>
 

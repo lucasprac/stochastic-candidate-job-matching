@@ -83,6 +83,33 @@ function cloneEvaluators(items: readonly EvaluatorConfig[]): EvaluatorConfig[] {
   return items.map((e) => ({ ...e }));
 }
 
+function createEmptyCandidate(suffix: string | number = 0): StochasticCandidate {
+  return {
+    id: `cand-${Date.now()}-${suffix}`,
+    name: '',
+    summary: '',
+    dossier: '',
+  };
+}
+
+function createEmptyCriterion(weight = 1, suffix: string | number = 0): StochasticCriterion {
+  return {
+    id: `crit-${Date.now()}-${suffix}`,
+    label: '',
+    description: '',
+    weight,
+  };
+}
+
+function createEmptyEvaluator(suffix: string | number = 0): EvaluatorConfig {
+  return {
+    id: `eval-${Date.now()}-${suffix}`,
+    name: '',
+    role: '',
+    focusPrompt: '',
+  };
+}
+
 function buildLinearUtilities(count: number): number[] {
   if (count <= 1) return [0];
   return Array.from({ length: count }, (_, idx) =>
@@ -261,17 +288,14 @@ const AGREEMENT_PRESETS = [
 export function StochasticEvaluator({
   apiKey,
   hasServerKey,
-  autoLoadDemo = false,
   exploreDemoNonce = 0,
   onOpenApiKeyDialog,
 }: {
   apiKey: string;
   hasServerKey: boolean;
-  autoLoadDemo?: boolean;
   exploreDemoNonce?: number;
   onOpenApiKeyDialog: () => void;
 }) {
-  const initialPreset = STOCHASTIC_PRESETS[0];
   const vagaId = useId();
   const candNameId = useId();
   const candSummaryId = useId();
@@ -290,22 +314,23 @@ export function StochasticEvaluator({
     });
   }, []);
 
-  const [activePresetId, setActivePresetId] = useState<string | null>(initialPreset.id);
-  const [vagaTexto, setVagaTexto] = useState<string>(initialPreset.vagaTexto);
-  const [candidates, setCandidates] = useState<StochasticCandidate[]>(() =>
-    cloneCandidates(initialPreset.candidates),
-  );
-  const [selectedCandidateIdx, setSelectedCandidateIdx] = useState(0);
-  const [criteria, setCriteria] = useState<StochasticCriterion[]>(() =>
-    cloneCriteria(initialPreset.criteria),
-  );
-  const [grades, setGrades] = useState<string[]>(() => [...initialPreset.grades]);
-  const [gradeUtilities, setGradeUtilities] = useState<number[]>(() => [
-    ...initialPreset.gradeUtilities,
+  const [activePresetId, setActivePresetId] = useState<string | null>(null);
+  const [vagaTexto, setVagaTexto] = useState<string>('');
+  const [candidates, setCandidates] = useState<StochasticCandidate[]>(() => [
+    createEmptyCandidate(1),
   ]);
-  const [evaluators, setEvaluators] = useState<EvaluatorConfig[]>(() =>
-    cloneEvaluators(initialPreset.evaluators),
-  );
+  const [selectedCandidateIdx, setSelectedCandidateIdx] = useState(0);
+  const [criteria, setCriteria] = useState<StochasticCriterion[]>(() => [
+    createEmptyCriterion(1, 1),
+  ]);
+  const [grades, setGrades] = useState<string[]>(() => [...DEFAULT_RUBRIC_GRADES]);
+  const [gradeUtilities, setGradeUtilities] = useState<number[]>(() => [
+    ...DEFAULT_GRADE_UTILITIES,
+  ]);
+  const [evaluators, setEvaluators] = useState<EvaluatorConfig[]>(() => [
+    createEmptyEvaluator(1),
+    createEmptyEvaluator(2),
+  ]);
   const [elicitationMode, setElicitationMode] = useState<ElicitationMode>('score_plus_noul');
 
   // Analysis parameters
@@ -418,9 +443,34 @@ export function StochasticEvaluator({
     gradeUtilities,
   ]);
 
+  const hasEnteredContent = (): boolean => {
+    if (vagaTexto.trim().length > 0) return true;
+    if (
+      candidates.some(
+        (c) =>
+          c.name.trim().length > 0 || c.summary.trim().length > 0 || c.dossier.trim().length > 0,
+      )
+    ) {
+      return true;
+    }
+    if (criteria.some((c) => c.label.trim().length > 0 || c.description.trim().length > 0)) {
+      return true;
+    }
+    if (
+      evaluators.some(
+        (e) =>
+          e.name.trim().length > 0 || e.role.trim().length > 0 || e.focusPrompt.trim().length > 0,
+      )
+    ) {
+      return true;
+    }
+    return false;
+  };
+
   const confirmReplaceIfNeeded = (actionLabel: string): boolean => {
     const hasUnsavedWork =
-      activePresetId === null || (session !== null && session.sourceMode === 'subq-snap-1.2');
+      (activePresetId === null && hasEnteredContent()) ||
+      (session !== null && session.sourceMode === 'subq-snap-1.2');
     if (!hasUnsavedWork) return true;
     return window.confirm(
       `Você tem alterações ou resultados ativos na tela. Deseja realmente ${actionLabel}?`,
@@ -445,8 +495,6 @@ export function StochasticEvaluator({
     setNeedsKeyHint(false);
     setSession(null);
   };
-
-  const autoLoadedRef = useRef(false);
 
   const loadSyntheticDemoSession = useCallback(
     (shouldScroll: boolean) => {
@@ -495,13 +543,6 @@ export function StochasticEvaluator({
   );
 
   useEffect(() => {
-    if (autoLoadDemo && !autoLoadedRef.current && session === null) {
-      autoLoadedRef.current = true;
-      loadSyntheticDemoSession(false);
-    }
-  }, [autoLoadDemo, session, loadSyntheticDemoSession]);
-
-  useEffect(() => {
     if (exploreDemoNonce > 0) {
       if (session === null) {
         loadSyntheticDemoSession(true);
@@ -525,39 +566,12 @@ export function StochasticEvaluator({
     if (!confirmReplaceIfNeeded('limpar todos os campos da vaga e dos candidatos')) return;
     setActivePresetId(null);
     setVagaTexto('');
-    setCandidates([
-      {
-        id: `cand-${Date.now()}`,
-        name: 'Candidato 1',
-        summary: '',
-        dossier: '',
-      },
-    ]);
+    setCandidates([createEmptyCandidate(1)]);
     setSelectedCandidateIdx(0);
-    setCriteria([
-      {
-        id: `crit-${Date.now()}`,
-        label: 'Aderência Técnica',
-        description: 'Experiência prática nos requisitos principais da vaga.',
-        weight: 1,
-      },
-    ]);
+    setCriteria([createEmptyCriterion(1, 1)]);
     setGrades([...DEFAULT_RUBRIC_GRADES]);
     setGradeUtilities([...DEFAULT_GRADE_UTILITIES]);
-    setEvaluators([
-      {
-        id: `eval-${Date.now()}-1`,
-        name: 'Gestor da Vaga',
-        role: 'Liderança Técnica',
-        focusPrompt: 'Avalie evidências práticas e autonomia nos requisitos centrais da vaga.',
-      },
-      {
-        id: `eval-${Date.now()}-2`,
-        name: 'Recrutamento & Cultura',
-        role: 'RH / Pessoas',
-        focusPrompt: 'Avalie comunicação, colaboração, trajetória e alinhamento com a equipe.',
-      },
-    ]);
+    setEvaluators([createEmptyEvaluator(1), createEmptyEvaluator(2)]);
     setFileHint(null);
     setErrorMsg(null);
     setNeedsKeyHint(false);
@@ -997,15 +1011,7 @@ export function StochasticEvaluator({
                   if (candidates.length >= 6) return;
                   setActivePresetId(null);
                   const nextIdx = candidates.length;
-                  setCandidates((prev) => [
-                    ...prev,
-                    {
-                      id: `cand-${Date.now()}-${nextIdx}`,
-                      name: `Candidato ${nextIdx + 1}`,
-                      summary: '',
-                      dossier: '',
-                    },
-                  ]);
+                  setCandidates((prev) => [...prev, createEmptyCandidate(nextIdx + 1)]);
                   setSelectedCandidateIdx(nextIdx);
                 }}
                 disabled={candidates.length >= 6}
@@ -1050,6 +1056,7 @@ export function StochasticEvaluator({
                           prev.map((c, idx) => (idx === safeCandIdx ? { ...c, name: val } : c)),
                         );
                       }}
+                      placeholder="Nome do candidato"
                       className="sq-input px-3 py-1.5 text-sm"
                     />
                   </div>
@@ -1170,15 +1177,7 @@ export function StochasticEvaluator({
                 onClick={() => {
                   if (criteria.length >= 8) return;
                   setActivePresetId(null);
-                  setCriteria((prev) => [
-                    ...prev,
-                    {
-                      id: `crit-${Date.now()}-${prev.length}`,
-                      label: `Critério ${prev.length + 1}`,
-                      description: '',
-                      weight: 0.25,
-                    },
-                  ]);
+                  setCriteria((prev) => [...prev, createEmptyCriterion(0.25, prev.length + 1)]);
                 }}
               >
                 <Plus className="h-3.5 w-3.5" />
@@ -1199,6 +1198,7 @@ export function StochasticEvaluator({
                         type="text"
                         value={crit.label}
                         aria-label={`Nome do critério ${j + 1}`}
+                        placeholder="Nome do critério (ex.: Experiência prática)"
                         onChange={(e) => {
                           setActivePresetId(null);
                           const val = e.target.value;
@@ -1214,7 +1214,7 @@ export function StochasticEvaluator({
                       <PillButton
                         variant="ghost"
                         disabled={criteria.length <= 1}
-                        aria-label={`Remover critério ${crit.label}`}
+                        aria-label={`Remover critério ${crit.label || j + 1}`}
                         onClick={() => {
                           if (criteria.length <= 1) return;
                           setActivePresetId(null);
@@ -1391,16 +1391,7 @@ export function StochasticEvaluator({
               if (evaluators.length >= 6) return;
               setActivePresetId(null);
               const nextIdx = evaluators.length;
-              setEvaluators((prev) => [
-                ...prev,
-                {
-                  id: `eval-${Date.now()}-${nextIdx}`,
-                  name: `Avaliador ${nextIdx + 1}`,
-                  role: 'Especialista',
-                  focusPrompt:
-                    'Avalie evidências concretas do currículo sob o ponto de vista da sua área.',
-                },
-              ]);
+              setEvaluators((prev) => [...prev, createEmptyEvaluator(nextIdx + 1)]);
             }}
           >
             <Plus className="h-3.5 w-3.5" />

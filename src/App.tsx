@@ -127,14 +127,15 @@ export function App() {
           <div className="mb-5">
             <AlertBanner
               tone="info"
-              title="Demonstração interativa no GitHub Pages — motor estocástico 100% no navegador"
+              title="Motor estocástico 100% no navegador (GitHub Pages)"
               onDismiss={() => setBannerDismissed(true)}
             >
               <p>
-                Um estudo de caso completo já foi carregado abaixo: ajuste pesos dos critérios,
-                parâmetro de rigor (α), simulações Monte Carlo e edite as matrizes de crença em
-                tempo real. Para executar novas avaliações com IA via proxy local (
-                <code>/api/decide</code>), clone o repositório e rode <code>npm run dev</code>.
+                Preencha seus próprios dados abaixo ou clique em <strong>Ver exemplo pronto</strong>{' '}
+                para carregar um estudo de caso interativo e testar pesos, rigor (α), simulações
+                Monte Carlo e matrizes de crença em tempo real. Para executar avaliações com IA via
+                proxy local (<code>/api/decide</code>), clone o repositório e rode{' '}
+                <code>npm run dev</code>.
               </p>
             </AlertBanner>
           </div>
@@ -166,7 +167,6 @@ export function App() {
           <StochasticEvaluator
             apiKey={storedKeyState.key}
             hasServerKey={hasServerKey}
-            autoLoadDemo={isStaticHost}
             exploreDemoNonce={exploreDemoNonce}
             onOpenApiKeyDialog={() => setKeyDialogOpen(true)}
           />
