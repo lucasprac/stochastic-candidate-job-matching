@@ -1,0 +1,4 @@
+interface:
+  display_name: "Stochastic Belief Consensus"
+  short_description: "Analyze group agreement under uncertain assessments"
+  default_prompt: "Use $stochastic-belief-consensus to analyze these belief distributions and report consensus probability, sensitivity, and limitations."
