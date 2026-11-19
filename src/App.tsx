@@ -22,6 +22,7 @@ export function App() {
   const [mode, setMode] = useState<AppMode>('stochastic');
   const [hasServerKey, setHasServerKey] = useState(false);
   const [isStaticHost, setIsStaticHost] = useState(false);
+  const [proxyDeployment, setProxyDeployment] = useState<'local' | 'hosted'>('local');
   const [healthChecked, setHealthChecked] = useState(false);
   const [exploreDemoNonce, setExploreDemoNonce] = useState(0);
 
@@ -42,6 +43,7 @@ export function App() {
     fetchHealth(controller.signal)
       .then((health) => {
         setHasServerKey(Boolean(health.hasServerKey));
+        setProxyDeployment(health.deployment);
         setIsStaticHost(false);
         setHealthChecked(true);
       })
@@ -121,20 +123,25 @@ export function App() {
       />
 
       <main className="mx-auto w-full max-w-7xl flex-1 min-w-0 px-4 py-6 sm:px-6">
-        <ProjectHero isStaticHost={isStaticHost} onExploreDemo={handleExploreDemo} />
+        <ProjectHero
+          isStaticHost={isStaticHost}
+          proxyDeployment={proxyDeployment}
+          onExploreDemo={handleExploreDemo}
+        />
 
         {showStaticHostBanner ? (
           <div className="mb-5">
             <AlertBanner
               tone="info"
-              title="Motor estocástico 100% no navegador (GitHub Pages)"
+              title="Motor estocástico 100% no navegador (hospedagem estática)"
               onDismiss={() => setBannerDismissed(true)}
             >
               <p>
                 Preencha seus próprios dados abaixo ou clique em <strong>Ver exemplo pronto</strong>{' '}
                 para carregar um estudo de caso interativo e testar pesos, rigor (α), simulações
-                Monte Carlo e matrizes de crença em tempo real. Para executar avaliações com IA via
-                proxy local (<code>/api/decide</code>), clone o repositório e rode{' '}
+                Monte Carlo e matrizes de crença em tempo real. Este site não tem o proxy de
+                avaliação com IA (<code>/api/decide</code>). Para usar a IA, abra um deploy com
+                proxy (por exemplo, na Vercel) ou clone o repositório e rode{' '}
                 <code>npm run dev</code>.
               </p>
             </AlertBanner>
@@ -187,6 +194,7 @@ export function App() {
         currentKey={storedKeyState.key}
         persistent={storedKeyState.persistent}
         hasServerKey={hasServerKey}
+        isStaticHost={isStaticHost}
         onSaveKey={handleSaveKey}
         onClearKey={handleClearKey}
         colorScheme={colorScheme}

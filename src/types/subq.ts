@@ -70,4 +70,6 @@ export interface HealthResponse {
   ok: boolean;
   model: 'subq-snap-1.2';
   hasServerKey: boolean;
+  /** `local`: Vite dev/preview proxy. `hosted`: serverless function (for example Vercel). */
+  deployment: 'local' | 'hosted';
 }

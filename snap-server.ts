@@ -7,16 +7,47 @@ import type {
   SubqNoulAnswer,
   SubqQuestion,
   SubqScoreAnswer,
-} from './src/types/subq';
+} from './src/types/subq.js';
+import {
+  DEMO_BUDGET_COUNTER_KEY,
+  createUpstashBudgetStore,
+  estimateMaxInputTokens,
+  resolveBudgetLimitTokens,
+  type BudgetStore,
+  type DemoBudget,
+} from './demo-budget.js';
 
 export const MODEL = 'subq-snap-1.2' as const;
 export const DEFAULT_UPSTREAM_URL = 'https://api.subq.ai/v1/systemone';
 export const MAX_IN_FLIGHT = 6;
+export const MAX_IN_FLIGHT_PER_CLIENT = 3;
 export const MAX_BODY_BYTES = 1024 * 1024;
 export const UPSTREAM_TIMEOUT_MS = 60_000;
 
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-const ALLOWED_SEC_FETCH_SITES = new Set(['same-origin', 'same-site', 'none']);
+const LOCAL_ALLOWED_SEC_FETCH_SITES = new Set(['same-origin', 'same-site', 'none']);
+const HOSTED_ALLOWED_SEC_FETCH_SITES = new Set(['same-origin', 'none']);
+
+/**
+ * `local`: Vite dev/preview middleware. Only localhost Host and Origin values are accepted,
+ * and the server-side SUBQ_API_KEY from .env can be used.
+ *
+ * `hosted`: serverless function (for example on Vercel). Any Host is accepted, but a browser
+ * Origin must be the same origin as the Host. The server-side SUBQ_API_KEY is used only when a
+ * shared budget store is configured (see demo-budget.ts). Each call with that key is charged
+ * against a spending cap (SUBQ_DEMO_BUDGET_USD, default 3). Without a store, the key is not
+ * used and each visitor must send their own key. The key never goes to the browser.
+ */
+export type ProxyDeployment = 'local' | 'hosted';
+
+export interface SnapMiddlewareOptions {
+  deployment?: ProxyDeployment;
+  /**
+   * Hosted mode only. `undefined`: build the store from the Upstash env vars.
+   * `null`: no store, so the server key is not used.
+   */
+  budgetStore?: BudgetStore | null;
+}
 
 class HttpValidationError extends Error {
   readonly status: number;
@@ -124,16 +155,29 @@ function isValidLocalhostHostHeader(hostHeader: string | undefined): boolean {
   return true;
 }
 
-function validateRequestOriginAndHeaders(req: IncomingMessage): void {
+function validateRequestOriginAndHeaders(
+  req: IncomingMessage,
+  deployment: ProxyDeployment,
+): void {
   const hostHeader = getHeaderString(req.headers, 'host');
-  if (!isValidLocalhostHostHeader(hostHeader)) {
+  if (deployment === 'local' && !isValidLocalhostHostHeader(hostHeader)) {
     throw new HttpValidationError(
       403,
       'invalid_host',
       'Cabeçalho Host não autorizado para este proxy local.',
     );
   }
+  if (deployment === 'hosted' && !hostHeader?.trim()) {
+    throw new HttpValidationError(403, 'invalid_host', 'Cabeçalho Host ausente.');
+  }
 
+  // Browsers always send Origin (and modern browsers send Sec-Fetch-Site) on cross-origin
+  // POST requests. These checks stop cross-site requests, including "simple" requests that
+  // skip the CORS preflight. Non-browser clients can set any header, so these checks are
+  // not authentication. The proxy sends no CORS headers on purpose: a failed preflight
+  // from another origin is the expected result.
+  const allowedSecFetchSites =
+    deployment === 'hosted' ? HOSTED_ALLOWED_SEC_FETCH_SITES : LOCAL_ALLOWED_SEC_FETCH_SITES;
   const secFetchSite = req.headers['sec-fetch-site'];
   if (Array.isArray(secFetchSite)) {
     throw new HttpValidationError(
@@ -143,7 +187,7 @@ function validateRequestOriginAndHeaders(req: IncomingMessage): void {
     );
   }
   if (typeof secFetchSite === 'string' && secFetchSite.trim() !== '') {
-    if (!ALLOWED_SEC_FETCH_SITES.has(secFetchSite.trim().toLowerCase())) {
+    if (!allowedSecFetchSites.has(secFetchSite.trim().toLowerCase())) {
       throw new HttpValidationError(
         403,
         'forbidden_origin',
@@ -166,7 +210,7 @@ function validateRequestOriginAndHeaders(req: IncomingMessage): void {
       throw new HttpValidationError(
         403,
         'forbidden_origin',
-        'Origem opaca não permitida para o proxy local.',
+        'Origem opaca não permitida para o proxy.',
       );
     }
     let parsed: URL;
@@ -179,14 +223,17 @@ function validateRequestOriginAndHeaders(req: IncomingMessage): void {
         'Cabeçalho Origin malformado.',
       );
     }
-    if (
-      (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
-      !isLocalHostname(parsed.hostname)
-    ) {
+    const isAllowedOrigin =
+      deployment === 'hosted'
+        ? parsed.protocol === 'https:' &&
+          parsed.host.toLowerCase() === (hostHeader ?? '').trim().toLowerCase()
+        : (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+          isLocalHostname(parsed.hostname);
+    if (!isAllowedOrigin) {
       throw new HttpValidationError(
         403,
         'forbidden_origin',
-        'Origem não permitida para o proxy local.',
+        'Origem não permitida para o proxy.',
       );
     }
   }
@@ -203,6 +250,22 @@ function validateRequestOriginAndHeaders(req: IncomingMessage): void {
       'Content-Type deve ser application/json.',
     );
   }
+}
+
+/**
+ * Key that groups requests from one client for the per-client concurrency limit.
+ * In `local` mode every request comes from the local user. In `hosted` mode the platform
+ * sets the forwarding headers (Vercel sets `x-vercel-forwarded-for` and overwrites
+ * `x-forwarded-for` with the client IP).
+ */
+function getClientKey(req: IncomingMessage, deployment: ProxyDeployment): string {
+  if (deployment === 'local') return 'local';
+  const forwarded =
+    getHeaderString(req.headers, 'x-vercel-forwarded-for') ??
+    getHeaderString(req.headers, 'x-forwarded-for') ??
+    getHeaderString(req.headers, 'x-real-ip');
+  const first = forwarded?.split(',')[0]?.trim();
+  return first || req.socket?.remoteAddress || 'unknown';
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -885,12 +948,48 @@ function mapUpstreamError(
   }
 }
 
+/**
+ * Node.js `(req, res)` handler for serverless functions (for example `api/*.ts` on Vercel).
+ * It uses the `hosted` policy and resolves only after the response finishes, so the
+ * platform does not freeze the function while the upstream call is still running.
+ */
+export function createServerlessHandler(
+  env: Record<string, string | undefined> = process.env,
+  fetchImpl: typeof fetch = fetch,
+  budgetStore?: BudgetStore | null,
+): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
+  const middleware = createSnapMiddleware(env, fetchImpl, { deployment: 'hosted', budgetStore });
+  return (req, res) =>
+    new Promise<void>((resolve) => {
+      res.once('finish', () => resolve());
+      res.once('close', () => resolve());
+      middleware(req, res, () => {
+        sendJson(res, 404, { error: 'Rota não encontrada.', code: 'not_found' });
+      });
+    });
+}
+
 export function createSnapMiddleware(
   env: Record<string, string | undefined> = process.env,
   fetchImpl: typeof fetch = fetch,
+  options: SnapMiddlewareOptions = {},
 ): (req: IncomingMessage, res: ServerResponse, next: (err?: unknown) => void) => void {
+  const deployment: ProxyDeployment = options.deployment ?? 'local';
   const upstreamUrl = resolveUpstreamUrl(env);
+  const configuredServerKey = env.SUBQ_API_KEY?.trim() ?? '';
+  // Hosted mode: the owner's key is used only with a spending cap in a shared store.
+  let demoBudget: DemoBudget | null = null;
+  if (deployment === 'hosted' && configuredServerKey) {
+    const store =
+      options.budgetStore !== undefined ? options.budgetStore : createUpstashBudgetStore(env);
+    if (store) demoBudget = { store, limitTokens: resolveBudgetLimitTokens(env) };
+  }
+  const serverKey = deployment === 'local' || demoBudget ? configuredServerKey : '';
+  // These counters live in process memory. On a serverless platform each instance has its
+  // own counters, so they limit load per instance only. Use the platform firewall or rate
+  // limiting rules for a global, per-IP limit.
   let inFlight = 0;
+  const inFlightByClient = new Map<string, number>();
 
   async function handleDecide(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if ((req.method ?? 'GET').toUpperCase() !== 'POST') {
@@ -904,7 +1003,7 @@ export function createSnapMiddleware(
     }
 
     try {
-      validateRequestOriginAndHeaders(req);
+      validateRequestOriginAndHeaders(req, deployment);
     } catch (err) {
       drainRequestStream(req, res);
       if (err instanceof HttpValidationError) {
@@ -918,20 +1017,30 @@ export function createSnapMiddleware(
       throw err;
     }
 
-    if (inFlight >= MAX_IN_FLIGHT) {
+    const clientKey = getClientKey(req, deployment);
+    const clientInFlight = inFlightByClient.get(clientKey) ?? 0;
+    const clientLimit = deployment === 'local' ? MAX_IN_FLIGHT : MAX_IN_FLIGHT_PER_CLIENT;
+    if (inFlight >= MAX_IN_FLIGHT || clientInFlight >= clientLimit) {
       drainRequestStream(req, res);
-      sendJson(res, 429, {
-        error: 'Muitas requisições simultâneas em andamento (máximo 6).',
-        code: 'too_many_requests',
-      });
+      sendJson(
+        res,
+        429,
+        {
+          error: `Muitas requisições simultâneas em andamento (máximo ${clientLimit}).`,
+          code: 'too_many_requests',
+        },
+        { 'Retry-After': '5' },
+      );
       return;
     }
 
     inFlight += 1;
+    inFlightByClient.set(clientKey, clientInFlight + 1);
     try {
       const headerKey = getHeaderString(req.headers, 'x-subq-api-key')?.trim() ?? '';
-      const serverKey = env.SUBQ_API_KEY?.trim() ?? '';
       const apiKey = headerKey || serverKey;
+      // A visitor's own key is never charged against the demo budget.
+      const budget = headerKey ? null : demoBudget;
 
       if (!apiKey) {
         drainRequestStream(req, res);
@@ -945,6 +1054,35 @@ export function createSnapMiddleware(
       const rawBody = await readJsonBody(req, res);
       const { state, questions } = validateDecidePayload(rawBody);
 
+      const upstreamBody = JSON.stringify({ model: MODEL, state, questions });
+
+      // Reserve the maximum cost first, so concurrent requests cannot pass the cap together.
+      let reservedTokens = 0;
+      if (budget) {
+        const reserve = estimateMaxInputTokens(upstreamBody);
+        let total: number;
+        try {
+          total = await budget.store.incrBy(DEMO_BUDGET_COUNTER_KEY, reserve);
+        } catch {
+          sendJson(res, 503, {
+            error:
+              'O controle de gastos da demonstração está indisponível. Tente mais tarde ou use sua própria chave.',
+            code: 'demo_budget_unavailable',
+          });
+          return;
+        }
+        if (total > budget.limitTokens) {
+          await budget.store.incrBy(DEMO_BUDGET_COUNTER_KEY, -reserve).catch(() => undefined);
+          sendJson(res, 402, {
+            error:
+              'O limite de gastos da demonstração acabou. Para continuar, informe sua própria chave da API SubQ.',
+            code: 'demo_budget_exhausted',
+          });
+          return;
+        }
+        reservedTokens = reserve;
+      }
+
       const startedAt = Date.now();
       let upstreamRes: globalThis.Response;
       try {
@@ -954,11 +1092,7 @@ export function createSnapMiddleware(
             Authorization: `Bearer ${apiKey}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({
-            model: MODEL,
-            state,
-            questions,
-          }),
+          body: upstreamBody,
           signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
         });
       } catch (err) {
@@ -996,6 +1130,15 @@ export function createSnapMiddleware(
       }
 
       const { answers, usage } = sanitizeUpstreamAnswers(upstreamJson, questions);
+      // Correct the reservation to the billed tokens. Without a usage count, keep it all.
+      if (budget && usage.input_tokens > 0) {
+        const correction = usage.input_tokens - reservedTokens;
+        if (correction !== 0) {
+          await budget.store
+            .incrBy(DEMO_BUDGET_COUNTER_KEY, correction)
+            .catch(() => undefined);
+        }
+      }
       const latency_ms = Math.max(0, Math.round(Date.now() - startedAt));
 
       const responseBody: DecideResponse = {
@@ -1020,6 +1163,12 @@ export function createSnapMiddleware(
       });
     } finally {
       inFlight = Math.max(0, inFlight - 1);
+      const remaining = (inFlightByClient.get(clientKey) ?? 1) - 1;
+      if (remaining > 0) {
+        inFlightByClient.set(clientKey, remaining);
+      } else {
+        inFlightByClient.delete(clientKey);
+      }
     }
   }
 
@@ -1042,12 +1191,20 @@ export function createSnapMiddleware(
         );
         return;
       }
-      const health: HealthResponse = {
-        ok: true,
-        model: MODEL,
-        hasServerKey: Boolean(env.SUBQ_API_KEY?.trim()),
-      };
-      sendJson(res, 200, health);
+      void (async () => {
+        let hasServerKey = Boolean(serverKey);
+        if (hasServerKey && demoBudget) {
+          try {
+            const spent = await demoBudget.store.get(DEMO_BUDGET_COUNTER_KEY);
+            // Report the key as unavailable when not even a small request still fits.
+            hasServerKey = spent + estimateMaxInputTokens('') <= demoBudget.limitTokens;
+          } catch {
+            hasServerKey = false;
+          }
+        }
+        const health: HealthResponse = { ok: true, model: MODEL, hasServerKey, deployment };
+        sendJson(res, 200, health);
+      })();
       return;
     }
 

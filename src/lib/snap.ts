@@ -2,6 +2,8 @@ import type {
   DecideRequest,
   DecideResponse,
   HealthResponse,
+  SubqAnswer,
+  SubqQuestion,
 } from '../types/subq';
 
 export class SubqApiError extends Error {
@@ -113,7 +115,87 @@ export async function fetchHealth(signal?: AbortSignal): Promise<HealthResponse>
   if (!res.ok || !body || typeof body !== 'object') {
     throw buildApiError(res, body, 'Não foi possível verificar o status do serviço de avaliação.');
   }
-  return body as HealthResponse;
+  const health = parseHealthResponse(body);
+  if (!health) {
+    throw new SubqApiError(
+      'Não foi possível verificar o status do serviço de avaliação.',
+      res.status,
+      { code: 'invalid_health_response' },
+    );
+  }
+  return health;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function isProbabilityRecord(value: unknown): value is Record<string, number> {
+  return isRecord(value) && Object.values(value).every(isFiniteNumber);
+}
+
+/** Runtime check for /api/health. Returns null when the body does not match the contract. */
+export function parseHealthResponse(body: unknown): HealthResponse | null {
+  if (!isRecord(body) || body.ok !== true || typeof body.hasServerKey !== 'boolean') {
+    return null;
+  }
+  // Older proxies do not send `deployment`; they were always local.
+  const deployment = body.deployment === 'hosted' ? 'hosted' : 'local';
+  return { ok: true, model: 'subq-snap-1.2', hasServerKey: body.hasServerKey, deployment };
+}
+
+function isAnswerForQuestion(answer: unknown, question: SubqQuestion): answer is SubqAnswer {
+  if (!isRecord(answer) || answer.type !== question.type) return false;
+  switch (question.type) {
+    case 'choice':
+      return (
+        typeof answer.choice === 'string' &&
+        isProbabilityRecord(answer.probabilities) &&
+        isFiniteNumber(answer.confidence)
+      );
+    case 'score':
+      return (
+        isFiniteNumber(answer.score) &&
+        isRecord(answer.legend) &&
+        Object.values(answer.legend).every((label) => typeof label === 'string') &&
+        isProbabilityRecord(answer.probabilities) &&
+        isFiniteNumber(answer.confidence)
+      );
+    case 'noul':
+      return isFiniteNumber(answer.noul);
+  }
+}
+
+/**
+ * Runtime check for /api/decide. The response must contain one answer of the right type
+ * for every question that was sent. Returns null when the body does not match the contract,
+ * so a contract change fails with a clear error instead of breaking the UI later.
+ */
+export function parseDecideResponse(
+  body: unknown,
+  questions: Record<string, SubqQuestion>,
+): DecideResponse | null {
+  if (!isRecord(body) || !isRecord(body.answers)) return null;
+  const answers: Record<string, SubqAnswer> = {};
+  for (const [key, question] of Object.entries(questions)) {
+    const answer = body.answers[key];
+    if (!isAnswerForQuestion(answer, question)) return null;
+    answers[key] = answer;
+  }
+  const usage = isRecord(body.usage) ? body.usage : {};
+  return {
+    model: 'subq-snap-1.2',
+    answers,
+    usage: {
+      input_tokens: isFiniteNumber(usage.input_tokens) ? usage.input_tokens : 0,
+      output_tokens: isFiniteNumber(usage.output_tokens) ? usage.output_tokens : 0,
+    },
+    latency_ms: isFiniteNumber(body.latency_ms) ? body.latency_ms : 0,
+  };
 }
 
 export async function decideWithSubq(
@@ -146,7 +228,15 @@ export async function decideWithSubq(
     );
   }
 
-  return body as DecideResponse;
+  const parsed = parseDecideResponse(body, payload.questions);
+  if (!parsed) {
+    throw new SubqApiError(
+      'O serviço de avaliação retornou uma resposta em formato inesperado. Tente novamente em instantes.',
+      502,
+      { code: 'invalid_response_shape' },
+    );
+  }
+  return parsed;
 }
 
 export function normaliseProbabilities(

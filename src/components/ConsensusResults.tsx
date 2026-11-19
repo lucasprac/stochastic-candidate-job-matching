@@ -24,6 +24,7 @@ import type {
   StochasticCriterion,
   StochasticEvaluator,
 } from '../data/presets';
+import { toCsvRow } from '../lib/csv';
 import { formatDecimal, formatPercent } from '../lib/format';
 import { AlertBanner, PillButton, SurfaceCard } from './ui';
 
@@ -245,7 +246,6 @@ export function ConsensusResults({
   }, [consensus.mean_cell_pair_distance]);
 
   const handleExportCsv = () => {
-    const escapeCsv = (val: string) => `"${val.replace(/"/g, '""')}"`;
     const headers = [
       'Posição',
       'Candidato',
@@ -269,7 +269,9 @@ export function ConsensusResults({
           : (candRes.rankProbabilitiesRankWeighted[0] ?? 0);
       const tieRate = sortBy === 'equal' ? candRes.tieRate : candRes.tieRateRankWeighted;
 
-      return [
+      // Name and summary come from pasted CVs (untrusted input): toCsvRow neutralises
+      // values that a spreadsheet would run as formulas.
+      return toCsvRow([
         `${rankPos}º`,
         cand?.name ?? `Candidato ${candRes.index + 1}`,
         cand?.summary ?? '',
@@ -278,12 +280,10 @@ export function ConsensusResults({
         formatPercent(top1Prob, 0),
         formatPercent(candRes.meanIgnorance, 0),
         formatPercent(tieRate, 0),
-      ]
-        .map(escapeCsv)
-        .join(';');
+      ]);
     });
 
-    const csvContent = '\uFEFF' + [headers.map(escapeCsv).join(';'), ...rows].join('\r\n');
+    const csvContent = '\uFEFF' + [toCsvRow(headers), ...rows].join('\r\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');

@@ -3,11 +3,18 @@ import { PROJECT_META } from '../lib/projectMeta';
 
 export function ProjectHero({
   isStaticHost,
+  proxyDeployment,
   onExploreDemo,
 }: {
   isStaticHost: boolean;
+  proxyDeployment: 'local' | 'hosted';
   onExploreDemo: () => void;
 }) {
+  const hostingLabel = isStaticHost
+    ? 'Demo Interativa · Hospedagem Estática'
+    : proxyDeployment === 'hosted'
+      ? 'Demo Online + Proxy API'
+      : 'Ambiente Local + Proxy API';
   return (
     <section
       aria-label="Visão geral do projeto"
@@ -25,7 +32,7 @@ export function ProjectHero({
               Open Source · MIT License
             </span>
             <span className="text-[var(--sq-content-secondary)]">
-              {isStaticHost ? 'GitHub Pages · Demo Interativa' : 'Ambiente Local + Proxy API'}
+              {hostingLabel}
             </span>
           </div>
 

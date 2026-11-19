@@ -1,7 +1,17 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createSnapMiddleware, resolveUpstreamUrl } from './snap-server';
+import {
+  createServerlessHandler,
+  createSnapMiddleware,
+  resolveUpstreamUrl,
+} from './snap-server';
+import {
+  createMemoryBudgetStore,
+  createUpstashBudgetStore,
+  resolveBudgetLimitTokens,
+  type BudgetStore,
+} from './demo-budget';
 
 interface TestServer {
   baseUrl: string;
@@ -126,6 +136,7 @@ describe('snap-server middleware', () => {
       ok: true,
       model: 'subq-snap-1.2',
       hasServerKey: false,
+      deployment: 'local',
     });
 
     const withKey = await startMiddlewareServer({ SUBQ_API_KEY: '  sk-server-test  ' });
@@ -135,6 +146,7 @@ describe('snap-server middleware', () => {
       ok: true,
       model: 'subq-snap-1.2',
       hasServerKey: true,
+      deployment: 'local',
     });
   });
 
@@ -487,5 +499,338 @@ describe('snap-server middleware', () => {
     const parsed = JSON.parse(raw) as { error: string; code: string; upstreamStatus: number };
     expect(parsed.code).toBe('upstream_bad_request');
     expect(parsed.upstreamStatus).toBe(400);
+  });
+});
+
+describe('snap-server local mode edge cases', () => {
+  it('handles an upstream choice answer without probabilities (no reduce on empty input)', async () => {
+    const mockFetch = vi.fn<typeof fetch>(
+      async () =>
+        new Response(
+          JSON.stringify({
+            answers: {
+              fit_nivel: { type: 'choice' },
+              arquitetura: { type: 'score', probabilities: {} },
+              evidencia_suficiente: { type: 'noul', noul: 0.5 },
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+    );
+    const srv = await startMiddlewareServer({ SUBQ_API_KEY: 'sk-server-123' }, mockFetch);
+    const res = await fetch(`${srv.baseUrl}/api/decide`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(VALID_PAYLOAD),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      answers: Record<string, { probabilities?: Record<string, number>; choice?: string }>;
+    };
+    expect(body.answers.fit_nivel.probabilities).toEqual({ alto: 0, medio: 0 });
+    expect(body.answers.fit_nivel.choice).toBe('alto');
+    expect(body.answers.arquitetura.probabilities).toEqual({ '0': 0, '1': 0, '2': 0, '3': 0 });
+  });
+});
+
+describe('serverless handler (hosted mode)', () => {
+  async function startHostedServer(
+    env: Record<string, string | undefined> = {},
+    fetchImpl?: typeof fetch,
+    budgetStore?: BudgetStore | null,
+  ): Promise<TestServer> {
+    const handler = createServerlessHandler(env, fetchImpl, budgetStore);
+    const server = http.createServer((req, res) => {
+      void handler(req, res);
+    });
+    await new Promise<void>((resolve) => {
+      server.listen(0, '127.0.0.1', () => resolve());
+    });
+    const addr = server.address() as AddressInfo;
+    const handle: TestServer = {
+      baseUrl: `http://127.0.0.1:${addr.port}`,
+      port: addr.port,
+      close: () =>
+        new Promise<void>((resolve, reject) => {
+          server.close((err) => (err ? reject(err) : resolve()));
+        }),
+    };
+    activeServers.push(handle);
+    return handle;
+  }
+
+  const okUpstream = () =>
+    vi.fn<typeof fetch>(
+      async () =>
+        new Response(
+          JSON.stringify({ answers: { q1: { type: 'noul', noul: 0.4 } } }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+    );
+
+  const simplePayload = JSON.stringify({
+    state: 'texto',
+    questions: { q1: { type: 'noul', instructions: 'há evidência?' } },
+  });
+
+  function hostedPost(
+    srv: TestServer,
+    headers: Record<string, string>,
+    body: string = simplePayload,
+  ) {
+    return rawHttpRequest({
+      port: srv.port,
+      method: 'POST',
+      path: '/api/decide',
+      headers: { Host: 'app.example.com', 'Content-Type': 'application/json', ...headers },
+      body,
+    });
+  }
+
+  it('health reports hosted mode and never reports the server key', async () => {
+    const srv = await startHostedServer({ SUBQ_API_KEY: 'sk-owner' });
+    const res = await rawHttpRequest({
+      port: srv.port,
+      method: 'GET',
+      path: '/api/health',
+      headers: { Host: 'app.example.com' },
+    });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.text)).toEqual({
+      ok: true,
+      model: 'subq-snap-1.2',
+      hasServerKey: false,
+      deployment: 'hosted',
+    });
+  });
+
+  it('ignores SUBQ_API_KEY when no budget store is configured', async () => {
+    const mockFetch = okUpstream();
+    const srv = await startHostedServer({ SUBQ_API_KEY: 'sk-owner' }, mockFetch);
+    const res = await hostedPost(srv, { Origin: 'https://app.example.com' });
+    expect(res.status).toBe(401);
+    expect(JSON.parse(res.text).code).toBe('missing_api_key');
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('accepts a same-origin request with the visitor key and any Host', async () => {
+    const mockFetch = okUpstream();
+    const srv = await startHostedServer({}, mockFetch);
+    const res = await hostedPost(srv, {
+      Origin: 'https://app.example.com',
+      'Sec-Fetch-Site': 'same-origin',
+      'X-SubQ-Api-Key': 'sk-visitor',
+    });
+    expect(res.status).toBe(200);
+    const init = mockFetch.mock.calls[0]?.[1];
+    expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer sk-visitor');
+  });
+
+  it('blocks other origins, plain-http origins and same-site requests', async () => {
+    const mockFetch = okUpstream();
+    const srv = await startHostedServer({}, mockFetch);
+    const key = { 'X-SubQ-Api-Key': 'sk-visitor' };
+
+    expect((await hostedPost(srv, { ...key, Origin: 'https://evil.example' })).status).toBe(403);
+    expect((await hostedPost(srv, { ...key, Origin: 'http://app.example.com' })).status).toBe(403);
+    expect(
+      (await hostedPost(srv, { ...key, Origin: 'https://other.vercel.app' })).status,
+    ).toBe(403);
+    expect((await hostedPost(srv, { ...key, 'Sec-Fetch-Site': 'same-site' })).status).toBe(403);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('limits concurrent requests per client IP without blocking other clients', async () => {
+    let releaseAll!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseAll = resolve;
+    });
+    const mockFetch = vi.fn<typeof fetch>(async () => {
+      await gate;
+      return new Response(JSON.stringify({ answers: { q1: { type: 'noul', noul: 0.4 } } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    const srv = await startHostedServer({}, mockFetch);
+    const fromA = { 'X-SubQ-Api-Key': 'sk-a', 'X-Forwarded-For': '203.0.113.7' };
+    const fromB = { 'X-SubQ-Api-Key': 'sk-b', 'X-Forwarded-For': '198.51.100.9' };
+
+    const pending = Array.from({ length: 3 }, () => hostedPost(srv, fromA));
+    await vi.waitFor(() => {
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+    });
+
+    const fourthFromA = await hostedPost(srv, fromA);
+    expect(fourthFromA.status).toBe(429);
+    expect(fourthFromA.headers['retry-after']).toBe('5');
+
+    const pendingB = hostedPost(srv, fromB);
+    await vi.waitFor(() => {
+      expect(mockFetch).toHaveBeenCalledTimes(4);
+    });
+
+    releaseAll();
+    for (const r of await Promise.all([...pending, pendingB])) {
+      expect(r.status).toBe(200);
+    }
+  });
+
+  describe('owner key with the demo budget', () => {
+    const ownerEnv = { SUBQ_API_KEY: 'sk-owner-secret' };
+    const sameOrigin = { Origin: 'https://app.example.com' };
+    const billedUpstream = (inputTokens: number) =>
+      vi.fn<typeof fetch>(
+        async () =>
+          new Response(
+            JSON.stringify({
+              answers: { q1: { type: 'noul', noul: 0.4 } },
+              usage: { input_tokens: inputTokens, output_tokens: 0 },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          ),
+      );
+    const getHealth = (srv: TestServer) =>
+      rawHttpRequest({
+        port: srv.port,
+        method: 'GET',
+        path: '/api/health',
+        headers: { Host: 'app.example.com' },
+      });
+
+    it('uses the owner key, charges the billed tokens and never shows the key', async () => {
+      const store = createMemoryBudgetStore();
+      const mockFetch = billedUpstream(500);
+      const srv = await startHostedServer(ownerEnv, mockFetch, store);
+
+      const health = await getHealth(srv);
+      expect(JSON.parse(health.text).hasServerKey).toBe(true);
+
+      const res = await hostedPost(srv, sameOrigin);
+      expect(res.status).toBe(200);
+      const init = mockFetch.mock.calls[0]?.[1];
+      expect((init?.headers as Record<string, string>).Authorization).toBe(
+        'Bearer sk-owner-secret',
+      );
+      expect(store.value()).toBe(500);
+
+      for (const r of [health, res]) {
+        expect(r.text).not.toContain('sk-owner-secret');
+        expect(JSON.stringify(r.headers)).not.toContain('sk-owner-secret');
+      }
+    });
+
+    it('converts the dollar cap to tokens at $0.04 per 1M tokens', () => {
+      expect(resolveBudgetLimitTokens({})).toBe(75_000_000);
+      expect(resolveBudgetLimitTokens({ SUBQ_DEMO_BUDGET_USD: '1' })).toBe(25_000_000);
+      expect(() => resolveBudgetLimitTokens({ SUBQ_DEMO_BUDGET_USD: '-1' })).toThrow();
+    });
+
+    it('refuses the request when the reservation passes the cap', async () => {
+      // $0.0004 at $0.04 per 1M tokens = 10,000 tokens.
+      const env = { ...ownerEnv, SUBQ_DEMO_BUDGET_USD: '0.0004' };
+      const store = createMemoryBudgetStore(9_000);
+      const mockFetch = billedUpstream(10);
+      const srv = await startHostedServer(env, mockFetch, store);
+
+      const res = await hostedPost(srv, sameOrigin);
+      expect(res.status).toBe(402);
+      expect(JSON.parse(res.text).code).toBe('demo_budget_exhausted');
+      expect(mockFetch).not.toHaveBeenCalled();
+      expect(store.value()).toBe(9_000);
+
+      expect(JSON.parse((await getHealth(srv)).text).hasServerKey).toBe(false);
+    });
+
+    it('lets a visitor key work after the budget is spent, without charging it', async () => {
+      const env = { ...ownerEnv, SUBQ_DEMO_BUDGET_USD: '0.0004' };
+      const store = createMemoryBudgetStore(10_000);
+      const mockFetch = billedUpstream(500);
+      const srv = await startHostedServer(env, mockFetch, store);
+
+      const res = await hostedPost(srv, { ...sameOrigin, 'X-SubQ-Api-Key': 'sk-visitor' });
+      expect(res.status).toBe(200);
+      const init = mockFetch.mock.calls[0]?.[1];
+      expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer sk-visitor');
+      expect(store.value()).toBe(10_000);
+    });
+
+    it('keeps the reservation when the upstream call fails', async () => {
+      const store = createMemoryBudgetStore();
+      const mockFetch = vi.fn<typeof fetch>(
+        async () => new Response('{"detail":{"message":"boom"}}', { status: 500 }),
+      );
+      const srv = await startHostedServer(ownerEnv, mockFetch, store);
+
+      const res = await hostedPost(srv, sameOrigin);
+      expect(res.status).toBe(502);
+      expect(store.value()).toBeGreaterThan(0);
+    });
+
+    it('fails closed when the budget store is unreachable', async () => {
+      const broken: BudgetStore = {
+        incrBy: async () => {
+          throw new Error('down');
+        },
+        get: async () => {
+          throw new Error('down');
+        },
+      };
+      const mockFetch = billedUpstream(10);
+      const srv = await startHostedServer(ownerEnv, mockFetch, broken);
+
+      const res = await hostedPost(srv, sameOrigin);
+      expect(res.status).toBe(503);
+      expect(JSON.parse(res.text).code).toBe('demo_budget_unavailable');
+      expect(mockFetch).not.toHaveBeenCalled();
+      expect(JSON.parse((await getHealth(srv)).text).hasServerKey).toBe(false);
+    });
+  });
+
+  it('answers unknown paths with a JSON 404', async () => {
+    const srv = await startHostedServer({});
+    const res = await rawHttpRequest({
+      port: srv.port,
+      method: 'GET',
+      path: '/api/unknown',
+      headers: { Host: 'app.example.com' },
+    });
+    expect(res.status).toBe(404);
+    expect(JSON.parse(res.text).code).toBe('not_found');
+  });
+});
+
+describe('Upstash budget store', () => {
+  it('returns null without env vars and sends INCRBY/GET over REST', async () => {
+    expect(createUpstashBudgetStore({})).toBeNull();
+
+    const calls: unknown[] = [];
+    const mockFetch = vi.fn<typeof fetch>(async (_url, init) => {
+      calls.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ result: 42 }), { status: 200 });
+    });
+    const store = createUpstashBudgetStore(
+      { KV_REST_API_URL: 'https://example.upstash.io', KV_REST_API_TOKEN: 't0k' },
+      mockFetch,
+    );
+    expect(await store!.incrBy('k', 7)).toBe(42);
+    expect(await store!.get('k')).toBe(42);
+    expect(calls).toEqual([
+      ['INCRBY', 'k', 7],
+      ['GET', 'k'],
+    ]);
+    const init = mockFetch.mock.calls[0]?.[1];
+    expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer t0k');
+  });
+
+  it('throws on a store error so the proxy can fail closed', async () => {
+    const mockFetch = vi.fn<typeof fetch>(
+      async () => new Response(JSON.stringify({ error: 'WRONGTYPE' }), { status: 400 }),
+    );
+    const store = createUpstashBudgetStore(
+      { UPSTASH_REDIS_REST_URL: 'https://example.upstash.io', UPSTASH_REDIS_REST_TOKEN: 't' },
+      mockFetch,
+    );
+    await expect(store!.incrBy('k', 1)).rejects.toThrow();
   });
 });

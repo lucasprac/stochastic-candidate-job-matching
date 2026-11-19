@@ -4,14 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
-    <script>
-      try {
-        var s = localStorage.getItem('subq-color-scheme');
-        if (s === 'light' || s === 'dark') {
-          document.querySelector('meta[name="color-scheme"]').content = s;
-        }
-      } catch (_) {}
-    </script>
+    <!-- External (not inline) so the Content-Security-Policy can use script-src 'self'. -->
+    <script src="/theme-init.js"></script>
     <meta
       name="description"
       content="Talento & Consenso — Plataforma interativa de avaliação comparativa de candidatos com matrizes de crença, incerteza explícita e consenso estocástico."

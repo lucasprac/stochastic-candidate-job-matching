@@ -1,5 +1,6 @@
 import { useEffect, useId, useState } from 'react';
 import { Eye, EyeOff, KeyRound, Monitor, Moon, Sun, Trash2 } from 'lucide-react';
+import { PERSISTENT_KEY_TTL_DAYS } from '../lib/apiKey';
 import { AlertBanner, DialogShell, PillButton } from './ui';
 
 export function ApiKeyDialog({
@@ -8,6 +9,7 @@ export function ApiKeyDialog({
   currentKey,
   persistent,
   hasServerKey,
+  isStaticHost,
   onSaveKey,
   onClearKey,
   colorScheme,
@@ -18,6 +20,7 @@ export function ApiKeyDialog({
   currentKey: string;
   persistent: boolean;
   hasServerKey: boolean;
+  isStaticHost: boolean;
   onSaveKey: (key: string, persistent: boolean) => void;
   onClearKey: () => void;
   colorScheme: 'system' | 'light' | 'dark';
@@ -75,10 +78,19 @@ export function ApiKeyDialog({
       maxWidthClass="max-w-lg"
     >
       <form onSubmit={handleSave} className="space-y-5">
+        {isStaticHost ? (
+          <AlertBanner tone="info" title="Este site não tem o proxy de avaliação com IA">
+            Esta hospedagem é só estática: não existe <code>/api/decide</code> aqui. Uma chave salva
+            neste site não é usada. Para avaliar com IA, use um deploy com proxy (por exemplo, na
+            Vercel) ou rode o projeto com <code>npm run dev</code>.
+          </AlertBanner>
+        ) : null}
+
         {hasServerKey ? (
-          <AlertBanner tone="info" title="Acesso já configurado no ambiente">
-            A chave de acesso já está configurada automaticamente neste servidor. Preencher o campo
-            abaixo é opcional caso queira usar uma chave própria.
+          <AlertBanner tone="info" title="Acesso já configurado no servidor">
+            Este servidor já tem uma chave de acesso, e você pode avaliar sem informar uma chave.
+            A chave do servidor não aparece no navegador. Em uma demonstração online, essa chave
+            tem um limite de gastos. Quando o limite acabar, informe sua própria chave abaixo.
           </AlertBanner>
         ) : null}
 
@@ -113,8 +125,10 @@ export function ApiKeyDialog({
           </div>
 
           <p className="text-[11px] leading-relaxed text-[var(--sq-content-secondary)]">
-            Sua chave fica salva apenas neste navegador e é usada somente para processar suas
-            avaliações com segurança.
+            A chave fica guardada neste navegador, sem criptografia. Em cada avaliação, ela vai
+            para o proxy deste site (<code>/api/decide</code>), que a repassa à API SubQ e não a
+            guarda. Extensões do navegador e scripts nesta página podem ler a chave: use uma
+            chave com limite de gastos e remova-a quando terminar.
           </p>
         </div>
 
@@ -131,10 +145,11 @@ export function ApiKeyDialog({
           />
           <div>
             <span className="font-medium text-[var(--sq-content-primary)]">
-              Manter chave salva neste navegador
+              Manter chave salva neste navegador por {PERSISTENT_KEY_TTL_DAYS} dias
             </span>
             <p className="mt-0.5 text-[11px] text-[var(--sq-content-secondary)]">
-              Se desmarcar, a chave será apagada automaticamente quando você fechar esta aba.
+              Depois desse prazo, a chave é apagada. Se desmarcar, a chave fica só nesta aba e é
+              apagada quando você fechar a aba.
             </p>
           </div>
         </label>
