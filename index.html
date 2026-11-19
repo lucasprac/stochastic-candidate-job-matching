@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <script>
+      try {
+        var s = localStorage.getItem('subq-color-scheme');
+        if (s === 'light' || s === 'dark') {
+          document.querySelector('meta[name="color-scheme"]').content = s;
+        }
+      } catch (_) {}
+    </script>
+    <meta
+      name="description"
+      content="Talento & Consenso — Plataforma interativa de avaliação comparativa de candidatos com matrizes de crença, incerteza explícita e consenso estocástico."
+    />
+    <meta property="og:type" content="website" />
+    <meta
+      property="og:title"
+      content="Talento & Consenso — Stochastic Candidate–Job Matching"
+    />
+    <meta
+      property="og:description"
+      content="Compare candidatos com uma banca multiavaliador usando matrizes de crença, análise de lacunas de evidência e simulação estocástica de consenso."
+    />
+    <meta
+      property="og:url"
+      content="https://lucasprac.github.io/stochastic-candidate-job-matching/"
+    />
+    <meta name="theme-color" content="#f0ede8" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0f0e0d" media="(prefers-color-scheme: dark)" />
+    <title>Talento &amp; Consenso — Stochastic Candidate–Job Matching</title>
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg?v=2" />
+    <script type="module" crossorigin src="./assets/index-BCJ7sD8i.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-CUXWTR7S.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>
